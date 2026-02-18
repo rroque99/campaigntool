@@ -11,6 +11,11 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/gmail.send",
         "https://www.googleapis.com/auth/gmail.readonly",
     ]
+    send_backend: str = "gmail_api"
+    playwright_session_dir: Path = Path("../credentials/playwright-session")
+    playwright_send_delay_seconds: int = 30
+    playwright_page_timeout_ms: int = 15000
+    playwright_browser: str = "chromium"
     daily_send_limit: int = 500
     reply_check_interval_minutes: int = 2
     api_prefix: str = "/api/v1"

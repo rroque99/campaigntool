@@ -320,14 +320,14 @@ class TestErrorScenarios:
         assert resp.status_code == 422
 
     async def test_schedule_without_auth(self, client: AsyncClient):
-        """Scheduling fails when Gmail is not authenticated."""
-        with patch("campaign.routers.campaigns.is_authenticated", return_value=False):
+        """Scheduling fails when sender is not ready."""
+        with patch("campaign.routers.campaigns._is_sender_ready", return_value=False):
             create = await _create_campaign(client)
             campaign_id = create.json()["id"]
 
             resp = await client.post(f"/api/v1/campaigns/{campaign_id}/schedule")
             assert resp.status_code == 400
-            assert "authenticated" in resp.json()["detail"].lower()
+            assert "not ready" in resp.json()["detail"].lower()
 
     async def test_schedule_wrong_status(self, client: AsyncClient, db: Session):
         """Cannot schedule an already completed campaign."""

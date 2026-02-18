@@ -1,6 +1,7 @@
 # Credentials
 credentials/
 !credentials/.gitkeep
+credentials/playwright-session/
 
 # Python
 .venv/

@@ -1,13 +1,14 @@
 # Gmail Email Campaign Tool
 
-Local web application for managing and sending email campaigns via the Gmail API. Built with FastAPI (Python) and React (TypeScript).
+Local web application for managing and sending email campaigns via the Gmail API or Playwright browser automation. Built with FastAPI (Python) and React (TypeScript).
 
 ## Features
 
 - Upload recipient lists (CSV/XLSX) and email templates (Markdown/DOCX)
 - Multi-step campaigns with absolute and relative scheduling
 - Email preview with template variable substitution
-- Automatic reply detection — remaining emails are cancelled when a recipient replies
+- Two send backends: **Gmail API** (full-featured) or **Playwright** (browser automation, no API credentials needed)
+- Automatic reply detection — remaining emails are cancelled when a recipient replies (Gmail API mode only)
 - Quota tracking (Gmail daily send limits)
 - Pause, resume, and cancel campaigns in progress
 - Single-page React frontend with real-time status updates
@@ -17,7 +18,8 @@ Local web application for managing and sending email campaigns via the Gmail API
 - Python 3.11+
 - Node.js 18+
 - [uv](https://docs.astral.sh/uv/) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- A Google Cloud project with the Gmail API enabled
+- **For Gmail API mode**: A Google Cloud project with the Gmail API enabled
+- **For Playwright mode**: No Google Cloud project needed — just a Gmail account
 
 ## Quick Start
 
@@ -51,6 +53,26 @@ npm run dev
 
 Open http://localhost:5173 in your browser. Go to **Settings** and connect your Gmail account.
 
+### Alternative: Playwright mode (no API credentials)
+
+If you don't have access to the Gmail API, you can use Playwright to send emails via browser automation.
+
+```bash
+cd backend
+uv sync --extra dev
+uv run playwright install chromium
+```
+
+Create a `.env` file in `backend/`:
+
+```
+SEND_BACKEND=playwright
+```
+
+Start the backend and frontend as above. In the browser, go to **Settings** and click **Open Gmail Login** to authenticate in the Chromium browser window that opens.
+
+> **Note**: Playwright mode requires a visible browser window (Google blocks headless automation). Reply detection is not available in this mode.
+
 ### Production (single command)
 
 Build the frontend and serve everything from the backend:
@@ -71,8 +93,13 @@ All settings can be overridden via environment variables or a `.env` file in `ba
 | `CREDENTIALS_DIR` | `../credentials` | Path to OAuth credentials directory |
 | `CORS_ORIGINS` | `["http://localhost:5173"]` | Allowed CORS origins (dev only) |
 | `DAILY_SEND_LIMIT` | `500` | Daily email send limit (500 personal, 2000 Workspace) |
-| `REPLY_CHECK_INTERVAL_MINUTES` | `15` | How often to check for replies |
+| `REPLY_CHECK_INTERVAL_MINUTES` | `2` | How often to check for replies (Gmail API mode only) |
 | `ENVIRONMENT` | `development` | Set to `production` to serve frontend from backend |
+| `SEND_BACKEND` | `gmail_api` | Send backend: `gmail_api` or `playwright` |
+| `PLAYWRIGHT_SEND_DELAY_SECONDS` | `30` | Delay between sends in Playwright mode (avoids abuse detection) |
+| `PLAYWRIGHT_PAGE_TIMEOUT_MS` | `15000` | Playwright page action timeout |
+| `PLAYWRIGHT_BROWSER` | `chromium` | Browser to use for Playwright |
+| `PLAYWRIGHT_SESSION_DIR` | `../credentials/playwright-session` | Persistent browser session directory |
 
 ## File Formats
 
@@ -131,11 +158,13 @@ All endpoints are prefixed with `/api/v1/`. Interactive API docs available at ht
 ### Auth
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/auth/status` | Check Gmail authentication status |
-| GET | `/auth/login` | Get OAuth consent URL |
+| GET | `/auth/status` | Auth status (includes sender backend info) |
+| GET | `/auth/login` | Get OAuth consent URL (Gmail API mode) |
 | GET | `/auth/callback` | OAuth callback (automatic redirect) |
-| POST | `/auth/logout` | Revoke credentials |
+| POST | `/auth/logout` | Revoke credentials (Gmail API mode) |
 | GET | `/auth/quota` | Daily send quota status |
+| GET | `/auth/playwright/status` | Playwright browser session status |
+| POST | `/auth/playwright/login` | Launch browser for Gmail login (Playwright mode) |
 
 ### Campaigns
 | Method | Endpoint | Description |
@@ -176,6 +205,12 @@ Gmail limits personal accounts to 500 sends/day (2000 for Google Workspace). Ema
 
 ### OAuth callback error
 Make sure `http://localhost:8000/api/v1/auth/callback` is listed as an authorized redirect URI in your Google Cloud Console OAuth client settings.
+
+### Playwright: "Gmail session expired"
+Your browser session cookies have expired. Go to **Settings** and click **Open Gmail Login** to re-authenticate.
+
+### Playwright: browser doesn't open
+Make sure you've installed the browser: `cd backend && uv run playwright install chromium`. Playwright mode requires a display — it won't work in headless server environments.
 
 ### CORS errors in development
 The frontend dev server (port 5173) proxies API requests to the backend (port 8000). Make sure both servers are running. If you see CORS errors, verify that `CORS_ORIGINS` includes `http://localhost:5173`.

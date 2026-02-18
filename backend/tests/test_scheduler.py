@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from campaign.gmail import ReplyCheckResult, SendResult
+from campaign.gmail import ReplyCheckResult
 from campaign.models import (
     Campaign,
     CampaignScheduleStep,
@@ -22,6 +22,7 @@ from campaign.scheduler import (
     schedule_campaign,
     send_email_job,
 )
+from campaign.sender import SendError, SendResult
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -123,10 +124,12 @@ class _NoCloseSession:
 
 
 @patch("campaign.scheduler.get_scheduler")
-@patch("campaign.scheduler.send_email")
-def test_send_email_job_success(mock_send, mock_get_sched, test_db):
+@patch("campaign.scheduler.get_sender")
+def test_send_email_job_success(mock_get_sender, mock_get_sched, test_db):
     """Successful send updates status and records message/thread IDs."""
-    mock_send.return_value = SendResult(message_id="msg_123", thread_id="thread_456")
+    mock_sender = MagicMock()
+    mock_sender.send_email.return_value = SendResult(message_id="msg_123", thread_id="thread_456")
+    mock_get_sender.return_value = mock_sender
     mock_scheduler = MagicMock()
     mock_get_sched.return_value = mock_scheduler
 
@@ -146,12 +149,12 @@ def test_send_email_job_success(mock_send, mock_get_sched, test_db):
 
 
 @patch("campaign.scheduler.get_scheduler")
-@patch("campaign.scheduler.send_email")
-def test_send_email_job_failure(mock_send, mock_get_sched, test_db):
+@patch("campaign.scheduler.get_sender")
+def test_send_email_job_failure(mock_get_sender, mock_get_sched, test_db):
     """Failed send records error message."""
-    from campaign.gmail import GmailError
-
-    mock_send.side_effect = GmailError("Auth revoked", error_code="send_failed")
+    mock_sender = MagicMock()
+    mock_sender.send_email.side_effect = SendError("Auth revoked", error_code="send_failed")
+    mock_get_sender.return_value = mock_sender
     mock_scheduler = MagicMock()
     mock_get_sched.return_value = mock_scheduler
 
@@ -169,8 +172,8 @@ def test_send_email_job_failure(mock_send, mock_get_sched, test_db):
 
 
 @patch("campaign.scheduler.get_scheduler")
-@patch("campaign.scheduler.send_email")
-def test_send_email_job_skips_cancelled(mock_send, mock_get_sched, test_db):
+@patch("campaign.scheduler.get_sender")
+def test_send_email_job_skips_cancelled(mock_get_sender, mock_get_sched, test_db):
     """Cancelled emails are skipped."""
     mock_scheduler = MagicMock()
     mock_get_sched.return_value = mock_scheduler
@@ -184,16 +187,18 @@ def test_send_email_job_skips_cancelled(mock_send, mock_get_sched, test_db):
     with patch("campaign.scheduler.SessionLocal", return_value=_NoCloseSession(test_db)):
         send_email_job(email1.id)
 
-    mock_send.assert_not_called()
+    mock_get_sender.return_value.send_email.assert_not_called()
 
 
 @patch("campaign.scheduler.get_scheduler")
-@patch("campaign.scheduler.send_email")
-def test_send_email_job_rate_limited_retries(mock_send, mock_get_sched, test_db):
-    """Rate-limited error triggers retry via rescheduling."""
-    from campaign.gmail import GmailError
-
-    mock_send.side_effect = GmailError("Rate limited", error_code="rate_limited")
+@patch("campaign.scheduler.get_sender")
+def test_send_email_job_rate_limited_retries(mock_get_sender, mock_get_sched, test_db):
+    """Retryable error triggers retry via rescheduling."""
+    mock_sender = MagicMock()
+    mock_sender.send_email.side_effect = SendError(
+        "Rate limited", error_code="rate_limited", retryable=True
+    )
+    mock_get_sender.return_value = mock_sender
     mock_scheduler = MagicMock()
     mock_get_sched.return_value = mock_scheduler
 
@@ -216,12 +221,14 @@ def test_send_email_job_rate_limited_retries(mock_send, mock_get_sched, test_db)
 
 
 @patch("campaign.scheduler.get_scheduler")
-@patch("campaign.scheduler.send_email")
-def test_send_email_job_rate_limited_exhausted(mock_send, mock_get_sched, test_db):
-    """Rate-limited with retries exhausted marks email as failed."""
-    from campaign.gmail import GmailError
-
-    mock_send.side_effect = GmailError("Rate limited", error_code="rate_limited")
+@patch("campaign.scheduler.get_sender")
+def test_send_email_job_rate_limited_exhausted(mock_get_sender, mock_get_sched, test_db):
+    """Retryable error with retries exhausted marks email as failed."""
+    mock_sender = MagicMock()
+    mock_sender.send_email.side_effect = SendError(
+        "Rate limited", error_code="rate_limited", retryable=True
+    )
+    mock_get_sender.return_value = mock_sender
     mock_scheduler = MagicMock()
     mock_get_sched.return_value = mock_scheduler
 
@@ -239,8 +246,8 @@ def test_send_email_job_rate_limited_exhausted(mock_send, mock_get_sched, test_d
 
 
 @patch("campaign.scheduler.get_scheduler")
-@patch("campaign.scheduler.send_email")
-def test_send_email_job_quota_exceeded(mock_send, mock_get_sched, test_db):
+@patch("campaign.scheduler.get_sender")
+def test_send_email_job_quota_exceeded(mock_get_sender, mock_get_sched, test_db):
     """Quota exceeded reschedules email for tomorrow."""
     mock_scheduler = MagicMock()
     mock_get_sched.return_value = mock_scheduler
@@ -259,17 +266,19 @@ def test_send_email_job_quota_exceeded(mock_send, mock_get_sched, test_db):
     # Email should still be scheduled, not failed
     test_db.refresh(email1)
     assert email1.status == "scheduled"
-    mock_send.assert_not_called()
+    mock_get_sender.return_value.send_email.assert_not_called()
 
 
 # ── Resolve next relative step ───────────────────────────────────────────
 
 
 @patch("campaign.scheduler.get_scheduler")
-@patch("campaign.scheduler.send_email")
-def test_send_email_resolves_next_relative_step(mock_send, mock_get_sched, test_db):
+@patch("campaign.scheduler.get_sender")
+def test_send_email_resolves_next_relative_step(mock_get_sender, mock_get_sched, test_db):
     """After sending step 1, step 2 (relative) gets scheduled_at resolved."""
-    mock_send.return_value = SendResult(message_id="msg_1", thread_id="thread_1")
+    mock_sender = MagicMock()
+    mock_sender.send_email.return_value = SendResult(message_id="msg_1", thread_id="thread_1")
+    mock_get_sender.return_value = mock_sender
     mock_scheduler = MagicMock()
     mock_get_sched.return_value = mock_scheduler
 
@@ -283,9 +292,10 @@ def test_send_email_resolves_next_relative_step(mock_send, mock_get_sched, test_
     test_db.refresh(email2)
     assert email2.status == "scheduled"
     assert email2.scheduled_at is not None
-    # Should be ~5 days after email1's sent_at
+    # Should be ~5 days after email1's sent_at (interpreted as UTC, converted to local)
     test_db.refresh(email1)
-    expected_date = email1.sent_at.date() + timedelta(days=5)
+    sent_local = email1.sent_at.replace(tzinfo=timezone.utc).astimezone()
+    expected_date = sent_local.date() + timedelta(days=5)
     assert email2.scheduled_at.date() == expected_date
 
 
@@ -465,16 +475,16 @@ async def test_schedule_endpoint_rejects_completed(mock_schedule, mock_auth, tes
 
 
 @pytest.mark.asyncio
-@patch("campaign.routers.campaigns.is_authenticated", return_value=False)
-async def test_schedule_endpoint_rejects_unauthenticated(mock_auth, test_client, test_db):
-    """Cannot schedule when Gmail is not authenticated."""
+@patch("campaign.routers.campaigns._is_sender_ready", return_value=False)
+async def test_schedule_endpoint_rejects_unauthenticated(mock_ready, test_client, test_db):
+    """Cannot schedule when sender is not ready."""
     campaign = Campaign(name="Test", status="draft")
     test_db.add(campaign)
     test_db.commit()
 
     response = await test_client.post(f"/api/v1/campaigns/{campaign.id}/schedule")
     assert response.status_code == 400
-    assert "not authenticated" in response.json()["detail"].lower()
+    assert "not ready" in response.json()["detail"].lower()
 
 
 @pytest.mark.asyncio

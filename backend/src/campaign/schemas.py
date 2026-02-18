@@ -1,4 +1,5 @@
 from datetime import date, datetime, time
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr
 
@@ -89,6 +90,7 @@ class EmailPreviewResponse(BaseModel):
     body_html: str
     step_order: int | None = None
     scheduled_at: datetime | None = None
+    status: str | None = None
 
 
 # --- Scheduling ---
@@ -172,12 +174,22 @@ class EmailDetailResponse(BaseModel):
 class AuthStatusResponse(BaseModel):
     authenticated: bool
     email: str | None = None
+    send_backend: str = "gmail_api"
+    reply_monitoring_enabled: bool = True
+    playwright_session_active: bool = False
+    playwright_session_email: str | None = None
 
 
 class QuotaResponse(BaseModel):
     sent_today: int
     limit: int
     remaining: int
+
+
+class PlaywrightStatusResponse(BaseModel):
+    session_active: bool
+    email: str | None = None
+    last_verified: datetime | None = None
 
 
 # --- Reply Detection ---
@@ -187,6 +199,13 @@ class ReplyCheckStatusResponse(BaseModel):
     last_checked_at: datetime | None
     history_id: str | None
     replies_detected: int = 0
+
+
+# --- Send Backend ---
+
+
+class SetSendBackendRequest(BaseModel):
+    send_backend: Literal["gmail_api", "playwright"]
 
 
 # --- Errors ---

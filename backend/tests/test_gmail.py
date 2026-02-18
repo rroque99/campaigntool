@@ -18,12 +18,11 @@ from campaign.auth import (
 from campaign.gmail import (
     GmailError,
     ReplyCheckResult,
-    SendResult,
     build_gmail_service,
     check_replies,
-    send_email,
 )
 from campaign.models import Email
+from campaign.sender import SendError
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -216,125 +215,22 @@ class TestRevokeCredentials:
         mock_creds.revoke.assert_called_once()
 
 
-# ── Gmail Send Tests ──────────────────────────────────────────────────────
+# ── Gmail Send Tests (moved to test_gmail_sender.py) ─────────────────────
 
 
-class TestSendEmail:
-    @patch("campaign.gmail.build_gmail_service")
-    def test_sends_email_successfully(self, mock_build):
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
+class TestGmailErrorHierarchy:
+    def test_gmail_error_is_send_error(self):
+        """GmailError should be a subclass of SendError."""
+        error = GmailError("test", error_code="test")
+        assert isinstance(error, SendError)
 
-        mock_send = MagicMock()
-        mock_send.execute.return_value = {"id": "msg-123", "threadId": "thread-456"}
-        mock_service.users().messages().send.return_value = mock_send
+    def test_gmail_error_retryable(self):
+        """GmailError supports the retryable flag."""
+        error = GmailError("rate limited", error_code="rate_limited", retryable=True)
+        assert error.retryable is True
 
-        result = send_email(
-            to="test@example.com",
-            subject="Hello",
-            body_html="<h1>Hello</h1>",
-            body_text="Hello",
-        )
-
-        assert isinstance(result, SendResult)
-        assert result.message_id == "msg-123"
-        assert result.thread_id == "thread-456"
-
-    @patch("campaign.gmail.build_gmail_service")
-    def test_sends_with_thread_id(self, mock_build):
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
-
-        mock_send = MagicMock()
-        mock_send.execute.return_value = {"id": "msg-789", "threadId": "thread-456"}
-        mock_service.users().messages().send.return_value = mock_send
-
-        result = send_email(
-            to="test@example.com",
-            subject="Re: Hello",
-            body_html="<p>Reply</p>",
-            body_text="Reply",
-            thread_id="thread-456",
-        )
-
-        # Verify threadId was included in the send body
-        call_kwargs = mock_service.users().messages().send.call_args
-        assert call_kwargs[1]["body"]["threadId"] == "thread-456"
-        assert result.thread_id == "thread-456"
-
-    @patch("campaign.gmail.build_gmail_service")
-    def test_mime_structure(self, mock_build):
-        """Verify the MIME message is multipart/alternative with plain + HTML."""
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
-
-        mock_send = MagicMock()
-        mock_send.execute.return_value = {"id": "msg-1", "threadId": "t-1"}
-        mock_service.users().messages().send.return_value = mock_send
-
-        send_email(
-            to="user@example.com",
-            subject="Test Subject",
-            body_html="<p>HTML body</p>",
-            body_text="Plain body",
-        )
-
-        call_kwargs = mock_service.users().messages().send.call_args
-        raw_b64 = call_kwargs[1]["body"]["raw"]
-
-        import base64
-        import email
-
-        raw_bytes = base64.urlsafe_b64decode(raw_b64)
-        msg = email.message_from_bytes(raw_bytes)
-
-        assert msg.get_content_type() == "multipart/alternative"
-        parts = list(msg.walk())
-        content_types = [p.get_content_type() for p in parts]
-        assert "text/plain" in content_types
-        assert "text/html" in content_types
-
-    @patch("campaign.gmail.build_gmail_service")
-    def test_handles_rate_limit(self, mock_build):
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
-
-        from googleapiclient.errors import HttpError
-
-        resp = MagicMock()
-        resp.status = 429
-        error = HttpError(resp=resp, content=b"Rate limit exceeded")
-        mock_service.users().messages().send.return_value.execute.side_effect = error
-
-        with pytest.raises(GmailError, match="rate limit"):
-            send_email("to@example.com", "Sub", "<p>Hi</p>", "Hi")
-
-    @patch("campaign.gmail.build_gmail_service")
-    def test_handles_api_error(self, mock_build):
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
-
-        from googleapiclient.errors import HttpError
-
-        resp = MagicMock()
-        resp.status = 400
-        error = HttpError(resp=resp, content=b"Bad request")
-        mock_service.users().messages().send.return_value.execute.side_effect = error
-
-        with pytest.raises(GmailError, match="Gmail API error"):
-            send_email("to@example.com", "Sub", "<p>Hi</p>", "Hi")
-
-    @patch("campaign.gmail.build_gmail_service")
-    def test_handles_network_error(self, mock_build):
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
-
-        mock_service.users().messages().send.return_value.execute.side_effect = ConnectionError(
-            "Network down"
-        )
-
-        with pytest.raises(GmailError, match="Failed to send email"):
-            send_email("to@example.com", "Sub", "<p>Hi</p>", "Hi")
+        error2 = GmailError("failed", error_code="send_failed")
+        assert error2.retryable is False
 
 
 class TestBuildGmailService:

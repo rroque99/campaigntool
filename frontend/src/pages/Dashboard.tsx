@@ -32,8 +32,15 @@ export default function Dashboard() {
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        {auth && !auth.authenticated && (
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+          {auth && (
+            <span className="inline-block rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600">
+              {auth.send_backend === "playwright" ? "Playwright" : "Gmail API"}
+            </span>
+          )}
+        </div>
+        {auth && !auth.authenticated && auth.send_backend === "gmail_api" && (
           <Link
             to="/settings"
             className="rounded-lg bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700 hover:bg-amber-100"
@@ -42,6 +49,16 @@ export default function Dashboard() {
           </Link>
         )}
       </div>
+
+      {/* Playwright session not active warning */}
+      {auth?.send_backend === "playwright" && !auth.playwright_session_active && (
+        <Link
+          to="/settings"
+          className="block rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700 hover:bg-amber-100"
+        >
+          Playwright session not active — campaigns cannot send emails. Click here to open Settings.
+        </Link>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">

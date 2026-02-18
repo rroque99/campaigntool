@@ -21,19 +21,28 @@ export default function EmailPreview({ previews }: EmailPreviewProps) {
       {/* Step selector */}
       {previews.length > 1 && (
         <div className="flex gap-2">
-          {previews.map((p, i) => (
-            <button
-              key={i}
-              onClick={() => setSelectedStep(i)}
-              className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
-                i === selectedStep
-                  ? "bg-blue-100 text-blue-700"
-                  : "text-gray-600 hover:bg-gray-100"
-              }`}
-            >
-              Step {p.step_order ?? i + 1}
-            </button>
-          ))}
+          {previews.map((p, i) => {
+            const isActive = i === selectedStep;
+            let colorClass = isActive ? "bg-blue-100 text-blue-700" : "text-gray-600 hover:bg-gray-100";
+            if (p.status === "sent") {
+              colorClass = isActive ? "bg-green-100 text-green-700" : "text-green-600 hover:bg-green-50";
+            } else if (p.status === "failed") {
+              colorClass = isActive ? "bg-red-100 text-red-700" : "text-red-600 hover:bg-red-50";
+            } else if (p.status === "cancelled") {
+              colorClass = isActive ? "bg-gray-200 text-gray-500" : "text-gray-400 hover:bg-gray-100";
+            } else if (p.status === "scheduled") {
+              colorClass = isActive ? "bg-blue-100 text-blue-700" : "text-blue-600 hover:bg-blue-50";
+            }
+            return (
+              <button
+                key={i}
+                onClick={() => setSelectedStep(i)}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium ${colorClass}`}
+              >
+                Step {p.step_order ?? i + 1}
+              </button>
+            );
+          })}
         </div>
       )}
 

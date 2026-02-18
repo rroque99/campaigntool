@@ -1,39 +1,37 @@
-"""Gmail API operations — send emails and check replies.
+"""Gmail API operations — reply detection and quota management.
 
-This module is the sole interface to the Gmail API. All other modules
-work with Pydantic schemas and SQLAlchemy models, never raw API responses.
+Send logic has been extracted to gmail_sender.py. This module retains
+Gmail API operations that are specific to the API backend: reply checking
+via the History API and send quota tracking.
 """
 
-import base64
 import logging
 from dataclasses import dataclass, field
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from campaign.auth import AuthError, get_credentials
 from campaign.config import settings
+from campaign.sender import SendError
 
 logger = logging.getLogger(__name__)
 
 
-class GmailError(Exception):
-    """Raised when Gmail API operations fail."""
+class GmailError(SendError):
+    """Raised when Gmail API operations fail.
 
-    def __init__(self, message: str, error_code: str = "gmail_error"):
-        self.message = message
-        self.error_code = error_code
-        super().__init__(message)
+    Subclass of SendError so the scheduler can catch all sender errors
+    with a single base class.
+    """
 
-
-@dataclass
-class SendResult:
-    """Result of a successful email send."""
-
-    message_id: str
-    thread_id: str
+    def __init__(
+        self,
+        message: str,
+        error_code: str = "gmail_error",
+        retryable: bool = False,
+    ):
+        super().__init__(message=message, error_code=error_code, retryable=retryable)
 
 
 @dataclass
@@ -53,68 +51,6 @@ def build_gmail_service():
         raise
     except Exception as e:
         raise GmailError(f"Failed to build Gmail service: {e}") from e
-
-
-def send_email(
-    to: str,
-    subject: str,
-    body_html: str,
-    body_text: str,
-    thread_id: str | None = None,
-) -> SendResult:
-    """Send an email via Gmail API.
-
-    Constructs a MIME multipart/alternative message with plain text and HTML parts,
-    base64url encodes it, and sends via the Gmail API.
-
-    Args:
-        to: Recipient email address.
-        subject: Email subject line.
-        body_html: HTML body content.
-        body_text: Plain text body content.
-        thread_id: Optional thread ID for reply threading.
-
-    Returns:
-        SendResult with Gmail message ID and thread ID.
-
-    Raises:
-        GmailError: If the send operation fails.
-    """
-    service = build_gmail_service()
-
-    message = MIMEMultipart("alternative")
-    message["to"] = to
-    message["subject"] = subject
-
-    part_text = MIMEText(body_text, "plain")
-    part_html = MIMEText(body_html, "html")
-    message.attach(part_text)
-    message.attach(part_html)
-
-    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
-    body: dict = {"raw": raw}
-    if thread_id:
-        body["threadId"] = thread_id
-
-    try:
-        result = service.users().messages().send(userId="me", body=body).execute()
-        return SendResult(
-            message_id=result["id"],
-            thread_id=result["threadId"],
-        )
-    except HttpError as e:
-        status_code = e.resp.status if e.resp else 0
-        if status_code == 429:
-            raise GmailError(
-                "Gmail API rate limit exceeded. Try again later.",
-                error_code="rate_limited",
-            ) from e
-        raise GmailError(
-            f"Gmail API error ({status_code}): {e}",
-            error_code="send_failed",
-        ) from e
-    except Exception as e:
-        raise GmailError(f"Failed to send email: {e}", error_code="send_failed") from e
 
 
 def get_send_quota_remaining(sent_today: int) -> int:

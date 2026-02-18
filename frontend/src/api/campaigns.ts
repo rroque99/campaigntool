@@ -10,6 +10,7 @@ import type {
   EmailListResponse,
   EmailPreview,
   PauseResponse,
+  PlaywrightStatus,
   RecipientCreateRequest,
   RecipientCreateResponse,
   RecipientListResponse,
@@ -30,6 +31,43 @@ export function useSendQuota() {
   return useQuery<SendQuota>({
     queryKey: ["auth", "quota"],
     queryFn: async () => (await apiClient.get("/auth/quota")).data,
+  });
+}
+
+export function usePlaywrightStatus() {
+  return useQuery<PlaywrightStatus>({
+    queryKey: ["auth", "playwright", "status"],
+    queryFn: async () => (await apiClient.get("/auth/playwright/status")).data,
+  });
+}
+
+export function useSetSendBackend() {
+  const qc = useQueryClient();
+  return useMutation<AuthStatus, Error, "gmail_api" | "playwright">({
+    mutationFn: async (send_backend) =>
+      (await apiClient.post("/auth/send-backend", { send_backend })).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["auth"] });
+    },
+  });
+}
+
+export function usePlaywrightLogin() {
+  const qc = useQueryClient();
+  return useMutation<{ message: string }, Error, void>({
+    mutationFn: async () => (await apiClient.post("/auth/playwright/login")).data,
+    onSuccess: () => {
+      // Poll auth status until the session becomes active (Gmail needs time to load)
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts++;
+        await qc.invalidateQueries({ queryKey: ["auth"] });
+        const data = qc.getQueryData<AuthStatus>(["auth", "status"]);
+        if (data?.playwright_session_active || attempts >= 12) {
+          clearInterval(poll);
+        }
+      }, 3000);
+    },
   });
 }
 
@@ -139,6 +177,14 @@ export function useRecipients(
     queryKey: ["campaigns", campaignId, "recipients", params],
     queryFn: async () =>
       (await apiClient.get(`/campaigns/${campaignId}/recipients`, { params })).data,
+    refetchInterval: (query) => {
+      const d = query.state.data;
+      if (!d) return false;
+      const hasActive = d.items.some(
+        (r) => r.email_status === "pending" || r.email_status === "scheduled",
+      );
+      return hasActive ? 10_000 : false;
+    },
   });
 }
 

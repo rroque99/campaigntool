@@ -17,6 +17,7 @@ dependencies = [
     "markdown>=3.5",
     "apscheduler>=3.10",
     "python-multipart>=0.0.6",
+    "playwright>=1.40",
 ]
 
 [project.optional-dependencies]

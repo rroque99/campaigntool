@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,7 +10,8 @@ from fastapi.staticfiles import StaticFiles
 
 from campaign.config import settings
 from campaign.routers import auth, campaigns, emails, recipients
-from campaign.scheduler import start_reply_monitor, start_scheduler, stop_scheduler
+from campaign.scheduler import reschedule_missed_emails, start_reply_monitor, start_scheduler, stop_scheduler
+from campaign.sender_factory import get_active_backend, shutdown_sender
 
 logger = logging.getLogger(__name__)
 
@@ -23,15 +25,26 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup — store the main event loop for Playwright's scheduler bridge
+    backend = get_active_backend()
+    if backend == "playwright":
+        import campaign.playwright_sender as pw_mod
+
+        pw_mod._main_loop = asyncio.get_running_loop()
+
     start_scheduler()
-    try:
-        start_reply_monitor()
-    except Exception:
-        logger.warning("Could not start reply monitor (Gmail may not be authenticated yet).")
+    if backend == "gmail_api":
+        try:
+            start_reply_monitor()
+        except Exception:
+            logger.warning("Could not start reply monitor (Gmail may not be authenticated yet).")
+    else:
+        logger.info("Reply monitoring disabled (send_backend=%s).", backend)
+    reschedule_missed_emails()
     yield
     # Shutdown
     stop_scheduler()
+    shutdown_sender()
 
 
 app = FastAPI(

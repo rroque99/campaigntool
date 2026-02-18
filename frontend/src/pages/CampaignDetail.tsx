@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { parseUTC } from "../utils/dates";
 import {
   useAddRecipient,
+  useAuthStatus,
   useCampaign,
   useCampaignStatus,
   useCancelCampaign,
@@ -24,6 +25,7 @@ export default function CampaignDetail() {
 
   const { data: campaign, isLoading } = useCampaign(campaignId);
   const { data: status } = useCampaignStatus(campaignId);
+  const { data: authStatus } = useAuthStatus();
 
   const scheduleMutation = useScheduleCampaign();
   const pauseMutation = usePauseCampaign();
@@ -173,6 +175,30 @@ export default function CampaignDetail() {
       {actionError && (
         <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{actionError}</div>
       )}
+
+      {/* Reply monitoring disabled warning */}
+      {authStatus && !authStatus.reply_monitoring_enabled && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
+          Automatic reply detection is disabled. Emails will not be automatically cancelled if
+          recipients reply. You can manually cancel individual recipients from the recipient list.
+        </div>
+      )}
+
+      {/* Playwright session expiry warning */}
+      {authStatus?.send_backend === "playwright" &&
+        !authStatus.playwright_session_active &&
+        (s === "paused" || s === "failed") && (
+          <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+            <p className="text-sm font-medium text-red-800">Gmail session expired</p>
+            <p className="mt-1 text-sm text-red-700">
+              The Playwright browser session is no longer active. Go to{" "}
+              <a href="/settings" className="font-medium underline hover:text-red-900">
+                Settings
+              </a>{" "}
+              to re-login and resume sending.
+            </p>
+          </div>
+        )}
 
       {/* Progress */}
       <div className="rounded-xl border border-gray-200 bg-white p-5">
