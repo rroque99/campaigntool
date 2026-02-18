@@ -5,6 +5,7 @@ survive restarts. All Gmail API calls go through gmail.py.
 """
 
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
@@ -15,7 +16,7 @@ from sqlalchemy import func
 from campaign.auth import is_authenticated
 from campaign.config import settings
 from campaign.database import SessionLocal
-from campaign.gmail import GmailError, check_replies, send_email
+from campaign.gmail import GmailError, check_replies
 from campaign.models import (
     Campaign,
     CampaignScheduleStep,
@@ -23,6 +24,8 @@ from campaign.models import (
     Recipient,
     ReplyCheckState,
 )
+from campaign.sender import SendError
+from campaign.sender_factory import get_active_backend, get_sender
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +34,9 @@ _scheduler: BackgroundScheduler | None = None
 # Maximum retries for transient send errors
 MAX_RETRIES = 3
 RETRY_BASE_DELAY_SECONDS = 5
+
+# Lock to serialize Playwright sends (single browser window)
+_playwright_send_lock = threading.Lock()
 
 
 def get_scheduler() -> BackgroundScheduler:
@@ -53,7 +59,7 @@ def start_scheduler() -> None:
     job_defaults = {
         "coalesce": True,
         "max_instances": 1,
-        "misfire_grace_time": 3600,  # allow 1 hour of misfire grace
+        "misfire_grace_time": 7 * 24 * 3600,  # 1 week — always fire missed jobs (e.g. after laptop sleep)
     }
 
     _scheduler = BackgroundScheduler(
@@ -65,6 +71,66 @@ def start_scheduler() -> None:
     _scheduler.add_listener(_on_job_event, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
     _scheduler.start()
     logger.info("Scheduler started.")
+
+    # Periodic catch-up: reschedule emails missed during sleep/downtime
+    _scheduler.add_job(
+        reschedule_missed_emails,
+        "interval",
+        minutes=2,
+        id="catch_up_missed",
+        replace_existing=True,
+    )
+    logger.info("Missed-email catch-up job registered (every 2 minutes).")
+
+
+def reschedule_missed_emails() -> None:
+    """Re-schedule any emails stuck in 'scheduled' status with past scheduled_at.
+
+    This handles the case where APScheduler jobs were lost (e.g., laptop sleep
+    exceeding misfire_grace_time, or server restart after job expiry).
+
+    Runs both at startup and periodically via the 'catch_up_missed' job.
+    """
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        missed = (
+            db.query(Email)
+            .filter(
+                Email.status == "scheduled",
+                Email.scheduled_at.is_not(None),
+                Email.scheduled_at < now,
+            )
+            .all()
+        )
+
+        if not missed:
+            return
+
+        # Check which emails already have an APScheduler job pending
+        try:
+            scheduler = get_scheduler()
+            existing_jobs = {j.id for j in scheduler.get_jobs()}
+        except RuntimeError:
+            existing_jobs = set()
+
+        to_reschedule = [
+            e for e in missed if f"send_email_{e.id}" not in existing_jobs
+        ]
+
+        if not to_reschedule:
+            return
+
+        # Schedule each missed email to send soon (stagger by 10s to avoid burst)
+        for i, email in enumerate(to_reschedule):
+            run_at = now + timedelta(seconds=10 + i * 10)
+            _schedule_send_job(email.id, run_at)
+
+        logger.info(
+            "Rescheduled %d missed emails for immediate delivery.", len(to_reschedule)
+        )
+    finally:
+        db.close()
 
 
 def stop_scheduler() -> None:
@@ -94,7 +160,22 @@ def send_email_job(email_id: int, retry_count: int = 0) -> None:
 
     Uses a fresh DB session (runs in a background thread). On transient
     failures, reschedules itself with exponential backoff up to MAX_RETRIES.
+
+    When using the Playwright backend, sends are serialized via a lock
+    because only a single browser window is available.
     """
+    use_lock = get_active_backend() == "playwright"
+    if use_lock:
+        _playwright_send_lock.acquire()
+    try:
+        _do_send_email(email_id, retry_count)
+    finally:
+        if use_lock:
+            _playwright_send_lock.release()
+
+
+def _do_send_email(email_id: int, retry_count: int = 0) -> None:
+    """Inner send logic, extracted for Playwright lock wrapping."""
     db = SessionLocal()
     try:
         email = db.query(Email).filter(Email.id == email_id).first()
@@ -136,9 +217,10 @@ def send_email_job(email_id: int, retry_count: int = 0) -> None:
             db.commit()
             return
 
-        # Send via Gmail API
+        # Send via configured backend
         try:
-            result = send_email(
+            sender = get_sender()
+            result = sender.send_email(
                 to=recipient.email,
                 subject=email.subject or "",
                 body_html=email.body_html or "",
@@ -147,8 +229,8 @@ def send_email_job(email_id: int, retry_count: int = 0) -> None:
             )
             email.status = "sent"
             email.sent_at = datetime.now(timezone.utc)
-            email.gmail_message_id = result.message_id
-            email.thread_id = result.thread_id
+            email.gmail_message_id = result.message_id or None
+            email.thread_id = result.thread_id or email.thread_id
             db.commit()
 
             logger.info("Email %d sent successfully (message_id=%s).", email_id, result.message_id)
@@ -159,8 +241,8 @@ def send_email_job(email_id: int, retry_count: int = 0) -> None:
             # Check if campaign is complete
             _update_campaign_status(db, email.campaign_id)
 
-        except GmailError as e:
-            if e.error_code == "rate_limited" and retry_count < MAX_RETRIES:
+        except SendError as e:
+            if e.retryable and retry_count < MAX_RETRIES:
                 delay = RETRY_BASE_DELAY_SECONDS * (2**retry_count)
                 logger.warning(
                     "Transient error sending email %d (attempt %d/%d): %s. Retrying in %ds.",
@@ -242,7 +324,7 @@ def _resolve_next_relative_step(db, sent_email: Email) -> None:
 
     # Compute scheduled_at from sent_at + relative_days + send_time
     # Interpret send_time as local system time
-    sent_local = sent_email.sent_at.astimezone()
+    sent_local = sent_email.sent_at.replace(tzinfo=timezone.utc).astimezone()
     base_date = sent_local.date() + timedelta(days=next_step.relative_days)
     local_dt = datetime.combine(base_date, next_step.send_time).astimezone()
     scheduled_at = local_dt.astimezone(timezone.utc)

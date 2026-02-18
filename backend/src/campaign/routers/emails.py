@@ -67,6 +67,7 @@ async def preview_campaign(
             body_html=e.body_html or "",
             step_order=e.step_order,
             scheduled_at=e.scheduled_at,
+            status=e.status,
         )
         for e in emails
     ]
@@ -106,6 +107,7 @@ async def preview_all(
             body_html=e.body_html or "",
             step_order=e.step_order,
             scheduled_at=e.scheduled_at,
+            status=e.status,
         )
         for e in emails
     ]

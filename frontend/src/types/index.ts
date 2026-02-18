@@ -141,6 +141,7 @@ export interface EmailPreview {
   body_html: string;
   step_order: number | null;
   scheduled_at: string | null;
+  status: string | null;
 }
 
 // --- Scheduling ---
@@ -162,9 +163,21 @@ export interface CancelResponse {
 
 // --- Auth ---
 
+export type SendBackend = "gmail_api" | "playwright";
+
 export interface AuthStatus {
   authenticated: boolean;
   email: string | null;
+  send_backend: SendBackend;
+  reply_monitoring_enabled: boolean;
+  playwright_session_active: boolean;
+  playwright_session_email: string | null;
+}
+
+export interface PlaywrightStatus {
+  session_active: boolean;
+  email: string | null;
+  last_verified: string | null;
 }
 
 export interface SendQuota {

@@ -1,6 +1,6 @@
 # Gmail Email Campaign Tool
 
-Local web application for managing and sending email campaigns via the Gmail API. Built with a FastAPI (Python) backend and React (TypeScript) frontend with Tailwind CSS.
+Local web application for managing and sending email campaigns via the Gmail API or Playwright browser automation. Built with a FastAPI (Python) backend and React (TypeScript) frontend with Tailwind CSS.
 
 Campaigns are defined by uploading spreadsheets (CSV/XLSX) containing recipients and referencing email content documents. The web UI presents campaign dashboards, email previews, scheduling controls, and delivery status tracking. Emails are scheduled and sent at specified times using APScheduler running within the FastAPI process, since the Gmail API does not expose Gmail's native "schedule send" feature.
 
@@ -10,6 +10,7 @@ Campaigns are defined by uploading spreadsheets (CSV/XLSX) containing recipients
 - **Package manager:** uv (manages venv, dependencies, and lockfile)
 - **Framework:** FastAPI with Uvicorn
 - **Gmail integration:** google-api-python-client, google-auth-oauthlib
+- **Browser automation (optional):** playwright (alternative sender backend)
 - **Spreadsheet parsing:** openpyxl for .xlsx, built-in csv module for .csv
 - **Document parsing:** python-docx for .docx email templates, or Markdown via markdown lib
 - **Scheduling:** APScheduler (BackgroundScheduler, runs inside the FastAPI process)
@@ -43,9 +44,13 @@ gmail-campaign-tool/
 │   │       ├── main.py              # FastAPI app, lifespan (scheduler start/stop), CORS
 │   │       ├── config.py            # Settings via pydantic-settings (ports, db path, etc.)
 │   │       ├── auth.py              # Gmail OAuth2 flow + token management
-│   │       ├── gmail.py             # Gmail API send operations (isolated)
+│   │       ├── gmail.py             # Gmail API reply detection + quota (send logic extracted)
+│   │       ├── sender.py            # SendBackend protocol + SendError/SendResult types
+│   │       ├── gmail_sender.py      # Gmail API sender (implements SendBackend)
+│   │       ├── playwright_sender.py # Playwright browser automation sender (implements SendBackend)
+│   │       ├── sender_factory.py    # Factory: returns sender based on config (singleton)
 │   │       ├── parser.py            # Spreadsheet + document parsing
-│   │       ├── scheduler.py         # APScheduler job management
+│   │       ├── scheduler.py         # APScheduler job management (uses sender_factory)
 │   │       ├── models.py            # SQLAlchemy ORM models
 │   │       ├── schemas.py           # Pydantic request/response schemas
 │   │       ├── templates.py         # Email template rendering (variable substitution)
@@ -59,9 +64,13 @@ gmail-campaign-tool/
 │   └── tests/
 │       ├── conftest.py
 │       ├── test_campaigns.py
-│       ├── test_parser.py
+│       ├── test_config.py
 │       ├── test_gmail.py
+│       ├── test_gmail_sender.py
+│       ├── test_parser.py
+│       ├── test_playwright_sender.py
 │       ├── test_scheduler.py
+│       ├── test_sender.py
 │       └── test_templates.py
 ├── frontend/
 │   ├── package.json
@@ -79,7 +88,7 @@ gmail-campaign-tool/
 │       │   ├── CampaignList.tsx     # All campaigns with status indicators
 │       │   ├── CampaignDetail.tsx   # Single campaign: recipients, schedule, delivery log
 │       │   ├── CampaignCreate.tsx   # Upload spreadsheet, configure, preview
-│       │   └── Settings.tsx         # Gmail auth status, reconnect, preferences
+│       │   └── Settings.tsx         # Sender mode, Gmail/Playwright auth, preferences
 │       ├── components/
 │       │   ├── Layout.tsx           # Sidebar nav + main content area
 │       │   ├── StatusBadge.tsx      # Reusable status indicator (draft/scheduled/sent/failed)
@@ -105,6 +114,7 @@ gmail-campaign-tool/
 ### Backend
 - Install uv (if not present): `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Install: `cd backend && uv sync`
+- Install with Playwright support: `cd backend && uv sync --extra dev && uv run playwright install chromium`
 - Run dev server: `cd backend && uv run uvicorn src.campaign.main:app --reload --port 8000`
 - Run tests: `cd backend && uv run pytest -v`
 - Lint: `cd backend && uv run ruff check src/ tests/`
@@ -122,9 +132,12 @@ gmail-campaign-tool/
 
 All endpoints prefixed with `/api/v1/`. Key routes:
 
-- `GET /api/v1/auth/status` — Check if Gmail is authenticated
+- `GET /api/v1/auth/status` — Check auth status (includes sender backend info, Playwright session)
 - `GET /api/v1/auth/login` — Initiate OAuth flow (redirects to Google)
 - `GET /api/v1/auth/callback` — OAuth callback handler
+- `GET /api/v1/auth/playwright/status` — Check Playwright browser session status
+- `POST /api/v1/auth/playwright/login` — Launch Playwright browser for Gmail login
+- `GET /api/v1/auth/quota` — Daily send quota status
 - `GET /api/v1/campaigns` — List all campaigns with summary stats
 - `POST /api/v1/campaigns` — Create campaign (multipart: spreadsheet upload + config)
 - `GET /api/v1/campaigns/{id}` — Campaign detail with recipient statuses
@@ -153,6 +166,9 @@ Use Alembic for all schema migrations. Never modify the database schema without 
 
 ## Architecture Decisions
 
+- **Sender abstraction**: Email sending uses a `SendBackend` protocol (in `sender.py`). Two implementations: `GmailAPISender` (Gmail API) and `PlaywrightSender` (browser automation). The `sender_factory` returns a singleton based on the `SEND_BACKEND` env var (`gmail_api` or `playwright`). The scheduler uses `get_sender()` to send emails.
+- **Playwright sender mode**: Alternative for users without Gmail API access. Automates the Gmail web UI via a headed Chromium browser. Session cookies persist in `credentials/playwright-session/`. Google blocks headless browsers, so the browser must be visible. Reply detection is NOT supported in Playwright mode — the reply monitor job is not started. `SendResult` returns empty `message_id`/`thread_id` since these can't be extracted from the web UI.
+- **Playwright settings**: `SEND_BACKEND` (default: `gmail_api`), `PLAYWRIGHT_SEND_DELAY_SECONDS` (default: 30), `PLAYWRIGHT_PAGE_TIMEOUT_MS` (default: 15000), `PLAYWRIGHT_BROWSER` (default: `chromium`), `PLAYWRIGHT_SESSION_DIR` (default: `../credentials/playwright-session`)
 - Keep Gmail API calls isolated in `gmail.py` — all other modules work with Pydantic schemas and SQLAlchemy models, never raw API responses
 - OAuth credentials (credentials.json, token.json) live in `credentials/` and are .gitignore'd — NEVER commit these
 - The backend serves only JSON API responses; the React frontend is a separate dev server in development and static files served by FastAPI in production
@@ -180,7 +196,7 @@ Use Alembic for all schema migrations. Never modify the database schema without 
 
 ## Testing
 
-- Mock all Gmail API calls in tests — never hit the real API
+- Mock all Gmail API calls and Playwright objects in tests — never hit real APIs or launch real browsers
 - Use httpx.AsyncClient as the FastAPI test client
 - Use fixtures for sample campaign spreadsheets and email templates
 - Test edge cases: missing columns, empty rows, invalid email addresses, past send dates, OAuth token expiry

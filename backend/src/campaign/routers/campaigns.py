@@ -5,6 +5,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from campaign.auth import is_authenticated
+from campaign.sender_factory import get_active_backend
 from campaign.database import get_db
 from campaign.models import Campaign, CampaignEmailTemplate, CampaignScheduleStep, Email, Recipient
 from campaign.parser import parse_email_document, parse_recipients_file, parse_schedule_file
@@ -20,6 +21,21 @@ from campaign.schemas import (
 from campaign.templates import render_email
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
+
+
+async def _is_sender_ready() -> bool:
+    """Check if the configured sender backend is ready to send."""
+    if get_active_backend() == "gmail_api":
+        return is_authenticated()
+    from campaign.sender_factory import get_sender
+
+    try:
+        sender = get_sender()
+        if hasattr(sender, "async_is_ready"):
+            return await sender.async_is_ready()
+        return sender.is_ready()
+    except Exception:
+        return False
 
 
 def _campaign_to_response(campaign: Campaign, db: Session) -> CampaignResponse:
@@ -249,10 +265,13 @@ async def schedule_campaign_endpoint(campaign_id: int, db: Session = Depends(get
             ),
         )
 
-    if not is_authenticated():
+    if not await _is_sender_ready():
         raise HTTPException(
             status_code=400,
-            detail="Gmail is not authenticated. Please complete the OAuth flow first.",
+            detail=(
+                "Sender is not ready. "
+                "Please complete authentication or check your sender configuration."
+            ),
         )
 
     result = schedule_campaign(db, campaign_id)
